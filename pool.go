@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -38,6 +39,20 @@ func (a *Account) MarkExhausted() {
 	defer a.mu.Unlock()
 	if a.status == StatusHealthy {
 		a.status = StatusExhausted
+		log.Printf("account %s: marked exhausted (removed from pool)", a.Name())
+	}
+}
+
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		// Timeout must be 0: per-request context owns the full lifecycle
+		// (headers + streaming body). Client.Timeout aborts body reads
+		// independently and poisons shared keep-alive connections.
+		Timeout: 0,
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
 	}
 }
 
@@ -67,7 +82,7 @@ func NewPool(cfgs []AccountConfig) *Pool {
 		accs[i] = &Account{
 			cfg:    cfg,
 			status: StatusHealthy,
-			client: &http.Client{Timeout: upstreamTimeout},
+			client: newHTTPClient(),
 		}
 	}
 	return &Pool{accounts: accs}
