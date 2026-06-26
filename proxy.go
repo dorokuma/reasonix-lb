@@ -56,7 +56,7 @@ func proxyChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		req, err := http.NewRequest("POST", acc.BaseURL()+"/chat/completions", bytes.NewReader(bodyBytes))
+		req, err := http.NewRequestWithContext(r.Context(), "POST", acc.BaseURL()+"/chat/completions", bytes.NewReader(bodyBytes))
 		if err != nil {
 			log.Printf("proxy: failed to create request for %s: %v", acc.Name(), err)
 			continue
@@ -117,7 +117,7 @@ func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":{"message":"No healthy accounts","code":"no_accounts"}}`, 503)
 			return
 		}
-		req, err := http.NewRequest("GET", acc.BaseURL()+"/models", nil)
+		req, err := http.NewRequestWithContext(r.Context(), "GET", acc.BaseURL()+"/models", nil)
 		if err != nil {
 			log.Printf("proxy: failed to create models request for %s: %v", acc.Name(), err)
 			continue

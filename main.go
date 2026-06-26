@@ -25,7 +25,7 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
-	srv := &http.Server{Addr: cfg.Listen, Handler: NewProxyHandler(pool)}
+	srv := &http.Server{Addr: cfg.Listen, Handler: NewProxyHandler(pool), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second}
 	go func() {
 		<-sigCh
 		log.Printf("shutting down...")
