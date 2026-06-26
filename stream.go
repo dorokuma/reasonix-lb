@@ -27,7 +27,9 @@ func streamResponseBody(w http.ResponseWriter, body io.ReadCloser, clientReq *ht
 	n, err := io.Copy(dst, body)
 	if err != nil {
 		if clientReq != nil && clientReq.Context().Err() != nil {
-			log.Printf("proxy: client disconnected during stream for %s: %v", account, err)
+			log.Printf("proxy: client disconnected during stream for %s (written=%d): %v", account, n, err)
+		} else {
+			log.Printf("proxy: upstream stream error for %s (written=%d): %v", account, n, err)
 		}
 		// Drain the upstream body so the account connection is released cleanly
 		// even when the downstream client has already gone away.

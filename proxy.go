@@ -91,8 +91,8 @@ func proxyChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		req.Header.Set("Authorization", "Bearer "+acc.Key())
 
 		resp, err := acc.Client().Do(req)
-		cancel()
 		if err != nil {
+			cancel()
 			log.Printf("proxy: chat retry via %s (upstream error, not marking exhausted): %v", acc.Name(), err)
 			continue
 		}
@@ -100,11 +100,13 @@ func proxyChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		if isQuotaExhausted(resp.StatusCode) {
 			acc.MarkExhausted()
 			resp.Body.Close()
+			cancel()
 			log.Printf("account %s: quota exhausted (%d), trying next", acc.Name(), resp.StatusCode)
 			continue
 		}
 		if resp.StatusCode >= 500 {
 			resp.Body.Close()
+			cancel()
 			log.Printf("proxy: chat retry via %s (upstream %d, not marking exhausted)", acc.Name(), resp.StatusCode)
 			continue
 		}
@@ -120,6 +122,7 @@ func proxyChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(resp.StatusCode)
 		n, err := streamResponseBody(w, resp.Body, r, acc.Name())
 		resp.Body.Close()
+		cancel() // keep request ctx alive until body is fully read — canceling after Do() truncates SSE
 		if err != nil {
 			return
 		}
@@ -163,8 +166,8 @@ func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		}
 		req.Header.Set("Authorization", "Bearer "+acc.Key())
 		resp, err := acc.Client().Do(req)
-		cancel()
 		if err != nil {
+			cancel()
 			log.Printf("proxy: models retry via %s (upstream error, not marking exhausted): %v", acc.Name(), err)
 			continue
 		}
@@ -172,10 +175,12 @@ func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request) {
 			log.Printf("proxy: %s models quota exhausted (%d), marking exhausted", acc.Name(), resp.StatusCode)
 			acc.MarkExhausted()
 			resp.Body.Close()
+			cancel()
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			resp.Body.Close()
+			cancel()
 			log.Printf("proxy: models retry via %s (status %d, not marking exhausted)", acc.Name(), resp.StatusCode)
 			continue
 		}
@@ -190,6 +195,7 @@ func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(resp.StatusCode)
 		n, err := io.Copy(w, resp.Body)
 		resp.Body.Close()
+		cancel()
 		if err != nil {
 			log.Printf("proxy: failed to copy models response body for %s: %v", acc.Name(), err)
 		} else {
