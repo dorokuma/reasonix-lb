@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"time"
 )
 
 var hopByHopHeaders = map[string]bool{
@@ -41,12 +42,15 @@ func NewProxyHandler(pool *Pool) http.Handler {
 }
 
 func proxyChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	defer r.Body.Close()
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
+		log.Printf("proxy: chat request from %s, body read error: %v", r.RemoteAddr, err)
 		http.Error(w, "failed to read body", 500)
 		return
 	}
+	log.Printf("proxy: chat request from %s, body=%d bytes", r.RemoteAddr, len(bodyBytes))
 
 	maxAttempts := len(pool.accounts) * 2
 	for attempts := 0; attempts < maxAttempts; attempts++ {
@@ -78,7 +82,7 @@ func proxyChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 
 		resp, err := acc.Client().Do(req)
 		if err != nil {
-			log.Printf("proxy: %s request failed: %v, trying next", acc.Name(), err)
+			log.Printf("proxy: chat retry via %s: %v", acc.Name(), err)
 			acc.MarkExhausted()
 			continue
 		}
@@ -104,12 +108,15 @@ func proxyChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 			log.Printf("proxy: failed to copy response body for %s: %v", acc.Name(), err)
 		}
 		resp.Body.Close()
+		log.Printf("proxy: chat done via %s, status=%d, elapsed=%v", acc.Name(), resp.StatusCode, time.Since(start))
 		return
 	}
+	log.Printf("proxy: chat failed, all exhausted")
 	http.Error(w, `{"error":{"message":"All accounts exhausted after retries","code":"all_exhausted"}}`, 503)
 }
 
 func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request) {
+	log.Printf("proxy: models request from %s", r.RemoteAddr)
 	maxAttempts := len(pool.accounts) * 2
 	for attempts := 0; attempts < maxAttempts; attempts++ {
 		acc := pool.Select()
@@ -137,7 +144,7 @@ func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		req.Header.Set("Authorization", "Bearer "+acc.Key())
 		resp, err := acc.Client().Do(req)
 		if err != nil {
-			log.Printf("proxy: %s models request failed: %v, trying next", acc.Name(), err)
+			log.Printf("proxy: models retry via %s: %v", acc.Name(), err)
 			acc.MarkExhausted()
 			continue
 		}
@@ -161,7 +168,9 @@ func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request) {
 			log.Printf("proxy: failed to copy models response body for %s: %v", acc.Name(), err)
 		}
 		resp.Body.Close()
+		log.Printf("proxy: models done via %s, status=%d", acc.Name(), resp.StatusCode)
 		return
 	}
+	log.Printf("proxy: models failed, all exhausted")
 	http.Error(w, `{"error":{"message":"All accounts exhausted for /models","code":"all_exhausted"}}`, 503)
 }
