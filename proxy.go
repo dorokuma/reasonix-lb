@@ -118,11 +118,12 @@ func proxyChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		n, err := io.Copy(w, resp.Body)
+		n, err := streamResponseBody(w, resp.Body, r, acc.Name())
 		resp.Body.Close()
 		if err != nil {
-			log.Printf("proxy: failed to copy response body for %s: %v", acc.Name(), err)
-		} else if cl := resp.Header.Get("Content-Length"); cl != "" {
+			return
+		}
+		if cl := resp.Header.Get("Content-Length"); cl != "" {
 			log.Printf("proxy: chat done via %s, status=%d, written=%d, content-length=%s, elapsed=%v", acc.Name(), resp.StatusCode, n, cl, time.Since(start))
 		} else {
 			log.Printf("proxy: chat done via %s, status=%d, written=%d, elapsed=%v", acc.Name(), resp.StatusCode, n, time.Since(start))
