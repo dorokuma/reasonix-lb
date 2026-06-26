@@ -44,7 +44,9 @@ func (a *Account) MarkExhausted() {
 func (a *Account) MarkHealthy() {
     a.mu.Lock()
     defer a.mu.Unlock()
-    a.status = StatusHealthy
+    if a.status == StatusExhausted {
+        a.status = StatusHealthy
+    }
 }
 
 func (a *Account) Status() AccountStatus {

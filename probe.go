@@ -1,6 +1,7 @@
 package main
 
 import (
+    "io"
     "log"
     "net/http"
     "time"
@@ -43,6 +44,7 @@ func probeExhausted(pool *Pool) {
             log.Printf("probe %s: request failed: %v", acc.Name(), err)
             continue
         }
+        io.Copy(io.Discard, resp.Body)
         resp.Body.Close()
         if resp.StatusCode == 200 {
             acc.MarkHealthy()
