@@ -74,7 +74,7 @@ func probeExhausted(pool *Pool) {
 				if resp.StatusCode == 200 {
 					io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
-					acc.MarkHealthy()
+					pool.MarkHealthy(acc)
 					log.Printf("probe %s: recovered (200), returned to pool", acc.Name())
 					return
 				}

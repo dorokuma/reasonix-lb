@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -21,6 +23,63 @@ var hopByHopHeaders = map[string]bool{
 
 func isHopByHop(key string) bool {
 	return hopByHopHeaders[http.CanonicalHeaderKey(key)]
+}
+
+type OpenAIErrorResponse struct {
+	Error struct {
+		Message string      `json:"message"`
+		Type    string      `json:"type"`
+		Param   interface{} `json:"param"`
+		Code    string      `json:"code"`
+	} `json:"error"`
+}
+
+func isPermanentError(body []byte) bool {
+	var errResp OpenAIErrorResponse
+	var err error
+	if len(body) > 0 {
+		err = json.Unmarshal(body, &errResp)
+	} else {
+		return false
+	}
+
+	bodyStr := strings.ToLower(string(body))
+
+	if err == nil && errResp.Error.Code != "" {
+		code := strings.ToLower(errResp.Error.Code)
+		if code == "insufficient_quota" || code == "invalid_api_key" || code == "revoked" || code == "account_deactivated" {
+			return true
+		}
+	}
+
+	if strings.Contains(bodyStr, "quota exceeded") || strings.Contains(bodyStr, "deactivated") {
+		return true
+	}
+
+	return false
+}
+
+func handleUpstreamError(acc *Account, resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	limitReader := io.LimitReader(resp.Body, 4096)
+	bodyBytes, _ := io.ReadAll(limitReader)
+
+	if isPermanentError(bodyBytes) {
+		acc.MarkExhausted()
+		log.Printf("proxy: %s permanent error (status=%d), marking exhausted. body: %s", acc.Name(), resp.StatusCode, string(bodyBytes))
+		return
+	}
+
+	failures := acc.IncrementFailures()
+	if failures >= 3 {
+		acc.MarkExhausted()
+		log.Printf("proxy: %s consecutive failures >= 3 (status=%d), marking exhausted. body: %s", acc.Name(), resp.StatusCode, string(bodyBytes))
+	} else {
+		acc.SetCooldown(10 * time.Second)
+		log.Printf("proxy: %s temporary error (status=%d), cooling down for 10s (failures=%d). body: %s", acc.Name(), resp.StatusCode, failures, string(bodyBytes))
+	}
 }
 
 func isQuotaExhausted(status int) bool {
@@ -90,14 +149,18 @@ func proxyChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 
 	maxAttempts := len(pool.accounts) * 2
 	for attempts := 0; attempts < maxAttempts; attempts++ {
-		acc := pool.Select()
-		if acc == nil {
+		if attempts > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+		acc, err := pool.Select(r.Context())
+		if err != nil {
+			log.Printf("proxy: select account failed: %v", err)
 			http.Error(w, `{"error":{"message":"All accounts exhausted","code":"all_exhausted"}}`, 503)
 			return
 		}
-		defer acc.Release()
 
 		done, streamErr := func() (bool, error) {
+			defer pool.Release(acc)
 			ctx, cancel := upstreamContext(r)
 			defer cancel() // keep ctx alive until body is fully read — early cancel truncates SSE
 
@@ -121,11 +184,8 @@ func proxyChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 			}
 			defer resp.Body.Close()
 
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-				acc.MarkExhausted()
-				log.Printf("proxy: %s unauthorized (status=%d), marking exhausted", acc.Name(), resp.StatusCode)
+			if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
+				handleUpstreamError(acc, resp)
 				return false, nil
 			}
 			if resp.StatusCode == 429 {
@@ -134,15 +194,12 @@ func proxyChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 				log.Printf("proxy: %s rate-limited (429), cooling down for 2m", acc.Name())
 				return false, nil
 			}
-			if resp.StatusCode == 402 {
-				acc.MarkExhausted()
-				log.Printf("account %s: quota exhausted (402), marking exhausted", acc.Name())
-				return false, nil
-			}
 			if resp.StatusCode >= 500 {
 				log.Printf("proxy: chat retry via %s (upstream %d, not marking exhausted)", acc.Name(), resp.StatusCode)
 				return false, nil
 			}
+
+			acc.ResetFailures()
 
 			copyUpstreamHeaders(w, resp.Header)
 			w.WriteHeader(resp.StatusCode)
@@ -172,14 +229,18 @@ func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	log.Printf("proxy: models request from %s", r.RemoteAddr)
 	maxAttempts := len(pool.accounts) * 2
 	for attempts := 0; attempts < maxAttempts; attempts++ {
-		acc := pool.Select()
-		if acc == nil {
+		if attempts > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+		acc, err := pool.Select(r.Context())
+		if err != nil {
+			log.Printf("proxy: select account for models failed: %v", err)
 			http.Error(w, `{"error":{"message":"No healthy accounts","code":"no_accounts"}}`, 503)
 			return
 		}
-		defer acc.Release()
 
 		done := func() bool {
+			defer pool.Release(acc)
 			ctx, cancel := upstreamContext(r)
 			defer cancel()
 
@@ -202,11 +263,8 @@ func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request) {
 			}
 			defer resp.Body.Close()
 
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-				acc.MarkExhausted()
-				log.Printf("proxy: %s unauthorized (status=%d), marking exhausted", acc.Name(), resp.StatusCode)
+			if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
+				handleUpstreamError(acc, resp)
 				return false
 			}
 			if resp.StatusCode == 429 {
@@ -215,15 +273,12 @@ func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request) {
 				log.Printf("proxy: %s models rate-limited (429), cooling down for 2m", acc.Name())
 				return false
 			}
-			if resp.StatusCode == 402 {
-				acc.MarkExhausted()
-				log.Printf("proxy: %s models quota exhausted (402), marking exhausted", acc.Name())
-				return false
-			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				log.Printf("proxy: models retry via %s (status %d, not marking exhausted)", acc.Name(), resp.StatusCode)
 				return false
 			}
+
+			acc.ResetFailures()
 
 			copyUpstreamHeaders(w, resp.Header)
 			w.WriteHeader(resp.StatusCode)
