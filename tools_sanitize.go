@@ -156,6 +156,23 @@ func flattenToolEntry(item json.RawMessage) []map[string]any {
 		}
 		return out
 	}
+	// tool_search: deferred MCP tool discovery (Codex v0.142.5+)
+	if typ == "tool_search" {
+		desc, _ := rawStringField(m, "description")
+		fnObj := map[string]any{"name": "tool_search"}
+		if desc != "" {
+			fnObj["description"] = desc
+		}
+		if len(m["parameters"]) > 0 && string(m["parameters"]) != "null" {
+			fnObj["parameters"] = simplifyJSONSchema(jsonRawToAny(m["parameters"]))
+		} else {
+			fnObj["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		return []map[string]any{{
+			"type":     "function",
+			"function": fnObj,
+		}}
+	}
 	if t := asFunctionTool(m); t != nil {
 		return []map[string]any{t}
 	}

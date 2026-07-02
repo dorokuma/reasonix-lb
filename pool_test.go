@@ -168,3 +168,33 @@ func TestPoolMarkHealthyWakeup(t *testing.T) {
 		t.Fatal("timeout: waiting worker was not woken up by MarkHealthy")
 	}
 }
+
+func TestWindowedFailureReset(t *testing.T) {
+	acc := &Account{cfg: AccountConfig{Name: "test"}, status: StatusHealthy, client: newHTTPClient()}
+
+	// Simulate 4 failures with old timestamps (outside 30min window)
+	acc.mu.Lock()
+	acc.consecutiveFailures = 4
+	acc.lastFailureTime = time.Now().Add(-31 * time.Minute)
+	acc.mu.Unlock()
+
+	// Next failure should reset counter because outside window
+	got := acc.IncrementFailures()
+	if got != 1 {
+		t.Fatalf("expected 1 (windowed reset), got %d", got)
+	}
+}
+
+func TestQuotaCooldownNotExhaustion(t *testing.T) {
+	acc := &Account{cfg: AccountConfig{Name: "test"}, status: StatusHealthy, client: newHTTPClient()}
+
+	// Simulate quota error cooldown
+	acc.SetCooldown(30 * time.Minute)
+
+	if !acc.IsInCooldown() {
+		t.Fatal("expected account to be in cooldown")
+	}
+	if !acc.IsHealthy() {
+		t.Fatal("account should still be healthy after quota cooldown")
+	}
+}

@@ -2,9 +2,6 @@ package main
 
 import (
 	"bufio"
-	"os"
-	"path/filepath"
-	"log"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -53,24 +50,11 @@ func newResponsesStreamTranslator(model string) *responsesStreamTranslator {
 	}
 }
 
-var respDumpFile *os.File
-
-func init() {
-	dir := filepath.Join(os.TempDir(), "reasonix-lb-debug")
-	_ = os.MkdirAll(dir, 0o700)
-	f, err := os.OpenFile(filepath.Join(dir, "last-responses-output.txt"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err == nil {
-		respDumpFile = f
-	}
-}
 
 func (t *responsesStreamTranslator) emit(w io.Writer, payload map[string]any) error {
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return err
-	}
-	if respDumpFile != nil {
-		fmt.Fprintf(respDumpFile, "data: %s\n\n", b)
 	}
 	_, err = fmt.Fprintf(w, "data: %s\n\n", b)
 	return err
@@ -167,8 +151,6 @@ func translateChatStreamToResponses(w http.ResponseWriter, body io.Reader, model
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	var usage map[string]any
-	log.Printf("DEBUG stream: translator started, model=%s", model)
-	defer func() { log.Printf("DEBUG stream: translator ended, hadContent=%v, tools=%d", tr.hadMessageContent, len(tr.tools)) }()
 
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -197,7 +179,6 @@ func translateChatStreamToResponses(w http.ResponseWriter, body io.Reader, model
 		// model reasoning metadata rejects reasoning SSE — only forward assistant text.
 		_ = d.ReasoningContent
 		if d.Content != "" {
-			log.Printf("DEBUG stream: content chunk: %q", d.Content)
 			tr.hadMessageContent = true
 			tr.textBuf.WriteString(d.Content)
 			if err := tr.ensureContentPart(dst); err != nil {
@@ -232,7 +213,6 @@ func translateChatStreamToResponses(w http.ResponseWriter, body io.Reader, model
 				st.namespace = NamespaceForTool(tc.Function.Name)
 			}
 			if !st.added && st.name != "" {
-				log.Printf("DEBUG stream: tool_call added name=%s callID=%s", st.name, st.callID)
 				st.added = true
 				st.outputIndex = tr.nextOutputIdx
 				tr.nextOutputIdx++
@@ -264,7 +244,6 @@ func translateChatStreamToResponses(w http.ResponseWriter, body io.Reader, model
 			}
 		}
 	}
-	log.Printf("DEBUG stream: scanner done, err=%v", sc.Err())
 	if err := sc.Err(); err != nil {
 		return err
 	}

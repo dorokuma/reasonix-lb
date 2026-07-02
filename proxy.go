@@ -8,9 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
+	"sort"
 	"strings"
 	"time"
 )
@@ -183,7 +182,7 @@ func NewProxyHandler(pool *Pool, wire WireAPIMode, cfg *Config) http.Handler {
 			return
 		}
 		if r.URL.Path == "/v1/models" {
-			proxyModels(pool, w, r)
+			proxyModels(pool, w, r, cfg)
 			return
 		}
 		if r.URL.Path == "/v1/chat/completions" {
@@ -229,14 +228,7 @@ func proxyResponses(pool *Pool, w http.ResponseWriter, r *http.Request, cfg *Con
 	reqModel, _ = rawStringField(raw, "model")
 	reqModel = cfg.RemapModel(reqModel)
 
-	dumpDebugChatBody(chatBody)
-		// DEBUG: also dump the original responses body
-		{
-			dir := filepath.Join(os.TempDir(), "reasonix-lb-debug")
-			_ = os.MkdirAll(dir, 0o700)
-			_ = os.WriteFile(filepath.Join(dir, "last-responses-request.json"), bodyBytes, 0o600)
-		}
-	log.Printf("proxy: responses request from %s, stream=%v, chat_body=%d bytes", r.RemoteAddr, stream, len(chatBody))
+log.Printf("proxy: responses request from %s, stream=%v, chat_body=%d bytes", r.RemoteAddr, stream, len(chatBody))
 	proxyChatWithBody(pool, w, r, chatBody, start, chatForwardOpts{
 		responsesOut: true,
 		stream:       stream,
@@ -328,7 +320,7 @@ func proxyChatWithBody(pool *Pool, w http.ResponseWriter, r *http.Request, bodyB
 				// Still forward the error to client this time
 				errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 				if resp.StatusCode >= 400 {
-					dumpDebugChatBody(bodyBytes)
+	
 				}
 				log.Printf("proxy: chat upstream error via %s, status=%d, body=%s", acc.Name(), resp.StatusCode, string(errBody))
 				copyUpstreamHeaders(w, resp.Header)
@@ -341,7 +333,7 @@ func proxyChatWithBody(pool *Pool, w http.ResponseWriter, r *http.Request, bodyB
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 				if resp.StatusCode >= 400 {
-					dumpDebugChatBody(bodyBytes)
+	
 				}
 				log.Printf("proxy: chat upstream error via %s, status=%d, body=%s", acc.Name(), resp.StatusCode, string(errBody))
 				copyUpstreamHeaders(w, resp.Header)
@@ -370,12 +362,6 @@ func proxyChatWithBody(pool *Pool, w http.ResponseWriter, r *http.Request, bodyB
 				if err != nil {
 					return true, err
 				}
-			// DEBUG: dump raw upstream response
-			{
-				dir := filepath.Join(os.TempDir(), "reasonix-lb-debug")
-				_ = os.MkdirAll(dir, 0o700)
-				_ = os.WriteFile(filepath.Join(dir, "last-upstream-response.json"), rawBody, 0o600)
-			}
 				out, err := chatCompletionToResponse(rawBody, opts.model)
 				if err != nil {
 					log.Printf("proxy: responses json convert via %s: %v", acc.Name(), err)
@@ -415,88 +401,43 @@ func proxyChatWithBody(pool *Pool, w http.ResponseWriter, r *http.Request, bodyB
 	http.Error(w, `{"error":{"message":"All accounts exhausted after retries","code":"all_exhausted"}}`, 503)
 }
 
-func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request) {
+func proxyModels(pool *Pool, w http.ResponseWriter, r *http.Request, cfg *Config) {
 	log.Printf("proxy: models request from %s", r.RemoteAddr)
-	maxAttempts := len(pool.accounts) * 2
-	for attempts := 0; attempts < maxAttempts; attempts++ {
-		if attempts > 0 {
-			time.Sleep(100 * time.Millisecond)
-		}
-		acc, err := pool.Select(r.Context())
-		if err != nil {
-			log.Printf("proxy: select account for models failed: %v", err)
-			http.Error(w, `{"error":{"message":"No healthy accounts","code":"no_accounts"}}`, 503)
-			return
-		}
 
-		done := func() bool {
-			defer pool.Release(acc)
-			ctx, cancel := upstreamContext(r)
-			defer cancel()
-
-			targetURL := acc.BaseURL() + "/models"
-			if r.URL.RawQuery != "" {
-				targetURL += "?" + r.URL.RawQuery
-			}
-			req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
-			if err != nil {
-				log.Printf("proxy: failed to create models request for %s: %v", acc.Name(), err)
-				return false
-			}
-			copyClientHeaders(req.Header, r.Header)
-			req.Header.Set("Authorization", "Bearer "+acc.Key())
-
-			resp, err := acc.Client().Do(req)
-			if err != nil {
-				log.Printf("proxy: models retry via %s (upstream error): %v", acc.Name(), err)
-				return false
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
-				handleUpstreamError(acc, resp)
-				return false
-			}
-			if resp.StatusCode == 429 {
-				if isQuotaError(readBodyPreview(resp)) {
-					acc.SetCooldown(30 * time.Minute)
-					log.Printf("proxy: %s models 429+quota, cooling down 30m", acc.Name())
-				} else {
-					cd := parseRetryAfter(resp)
-					if cd <= 0 {
-						cd = 30 * time.Second
-					}
-					if cd > 5*time.Minute {
-						cd = 5 * time.Minute
-					}
-					acc.SetCooldown(cd)
-					log.Printf("proxy: %s models rate-limited (429), cooling down %v", acc.Name(), cd)
-				}
-				return false
-			}
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				log.Printf("proxy: models retry via %s (status %d, not marking exhausted)", acc.Name(), resp.StatusCode)
-				return false
-			}
-
-			acc.ResetFailures()
-
-			copyUpstreamHeaders(w, resp.Header)
-			w.WriteHeader(resp.StatusCode)
-			n, err := io.Copy(w, resp.Body)
-			if err != nil {
-				log.Printf("proxy: failed to copy models response body for %s: %v", acc.Name(), err)
-			} else {
-				log.Printf("proxy: models done via %s, status=%d, written=%d", acc.Name(), resp.StatusCode, n)
-			}
-			return true
-		}()
-		if done {
-			return
+	// Build model list from model_remap keys (the GPT model names users see).
+	modelIDs := make([]string, 0, len(cfg.ModelRemap)+1)
+	seen := make(map[string]bool)
+	for k := range cfg.ModelRemap {
+		if !seen[k] {
+			modelIDs = append(modelIDs, k)
+			seen[k] = true
 		}
 	}
-	log.Printf("proxy: models failed, all exhausted")
-	http.Error(w, `{"error":{"message":"All accounts exhausted for /models","code":"all_exhausted"}}`, 503)
+	if cfg.DefaultModel != "" && !seen[cfg.DefaultModel] {
+		modelIDs = append(modelIDs, cfg.DefaultModel)
+	}
+	if len(modelIDs) == 0 {
+		http.Error(w, `{"error":{"message":"No models configured","code":"no_models"}}`, 503)
+		return
+	}
+	sort.Strings(modelIDs)
+
+	data := make([]map[string]any, len(modelIDs))
+	for i, id := range modelIDs {
+		data[i] = map[string]any{
+			"id":       id,
+			"object":   "model",
+			"created":  1700000000,
+			"owned_by": "reasonix-lb",
+		}
+	}
+	resp := map[string]any{
+		"object": "list",
+		"data":   data,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+	log.Printf("proxy: models returning %d models", len(modelIDs))
 }
 
 // readBodyPreview reads up to 4KB from resp.Body for inspection and closes it.
